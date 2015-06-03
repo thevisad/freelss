@@ -24,9 +24,14 @@
 #include "Setup.h"
 #include "Laser.h"
 #include "Camera.h"
+#include "Progress.h"
+#include "PlyWriter.h"
 
 namespace freelss
 {
+
+// A warning is displayed if we have less than this amount of disk space available
+const int WebContent::LOW_DISK_SPACE_MB = 1000;
 
 const std::string WebContent::CSS = "\
 <style type=\"text/css\">\
@@ -101,6 +106,19 @@ A:active  {color: #ffffff; font-size: 22px; font-weight: bold; text-shadow: #000
 	background-color: rgb(200, 200, 200);\
 	border: solid 2px #1d5fa9;\
 	width: 625px;\
+}\
+#deleteButton {\
+	float: left;\
+	padding-left: 10px;\
+}\
+#viewButton {\
+	padding-left: 250px;\
+}\
+#error1 {\
+	font-size: 40px;\
+	font-family: Verdana, serif, Arial, Helvetica;\
+	color: #ff0000;\
+	text-shadow: #000000 2px 2px 2px;\
 }\
 #vLine {\
 	position: absolute;\
@@ -236,6 +254,10 @@ const std::string WebContent::GENERATE_PLY = "GENERATE_PLY";
 const std::string WebContent::SEPARATE_LASERS_BY_COLOR = "SEPARATE_LASERS_BY_COLOR";
 const std::string WebContent::UNIT_OF_LENGTH = "UNIT_OF_LENGTH";
 const std::string WebContent::VERSION_NAME = "VERSION_NAME";
+const std::string WebContent::GROUND_PLANE_HEIGHT = "GROUND_PLANE_HEIGHT";
+const std::string WebContent::PLY_DATA_FORMAT = "PLY_DATA_FORMAT";
+const std::string WebContent::FREE_DISK_SPACE = "FREE_DISK_SPACE";
+
 
 const std::string WebContent::SERIAL_NUMBER_DESCR = "The serial number of the ATLAS 3D scanner";
 const std::string WebContent::CAMERA_X_DESCR = "X-compoment of camera location. ie: The camera is always at X = 0.";
@@ -266,9 +288,14 @@ const std::string WebContent::GENERATE_XYZ_DESCR = "Whether to generate an XYZ p
 const std::string WebContent::GENERATE_STL_DESCR = "Whether to generate an STL mesh from the scan.";
 const std::string WebContent::GENERATE_PLY_DESCR = "Whether to generate a PLY point clould from the scan.";
 const std::string WebContent::SEPARATE_LASERS_BY_COLOR_DESCR = "Calibration debugging option to separate the results from different lasers by color (requires PLY).";
+const std::string WebContent::GROUND_PLANE_HEIGHT_DESCR = "Any scan data less than this height above the turntable will not be included in the output files.";
+const std::string WebContent::PLY_DATA_FORMAT_DESCR = "Whether to generate binary or ASCII PLY files.";
 
 std::string WebContent::scan(const std::vector<ScanResult>& pastScans)
 {
+	const Preset& preset = PresetManager::get()->getActivePreset();
+	std::string presetName = preset.name;
+
 	std::stringstream sstr;
 	sstr << "<!DOCTYPE html><html><head>"
 		 << CSS
@@ -285,10 +312,17 @@ std::string WebContent::scan(const std::vector<ScanResult>& pastScans)
 </div>\
 <p>Click the button to start the scan </p>\
 <form action=\"/\" method=\"POST\" enctype=\"application/x-www-form-urlencoded\">\
+<div><div class=\"settingsText\">Preset</div><input class=\"settingsInput\" readonly=\"true\" value=\"" << presetName << "\"></div>\
 <div><div class=\"settingsText\">Degrees</div><input name=\"degrees\" class=\"settingsInput\" value=\"360\"> degrees</div>\
 	<input type=\"hidden\" name=\"cmd\" value=\"startScan\">\
 	<input class=\"submit\" type=\"submit\" value=\"Start Scan\">\
 </form>";
+
+	int diskSpaceMb = GetFreeSpaceMb();
+	if (diskSpaceMb < WebContent::LOW_DISK_SPACE_MB)
+	{
+		sstr << "<div id=\"error1\">LOW DISK SPACE WARNING: " << diskSpaceMb << " MB</div>";
+	}
 
 	for (size_t iRt = 0; iRt < pastScans.size(); iRt++)
 	{
@@ -320,6 +354,7 @@ std::string WebContent::scanResult(size_t index, const ScanResult& result)
 	<img width=\"128\" border=\"0\" src=\"" << thumbnail.str() << "\">\
 	</div>";
 
+	bool hasPly = false;
 	const std::vector<ScanResultFile>& files = result.files;
 	for (size_t iFil = 0; iFil < files.size(); iFil++)
 	{
@@ -349,13 +384,28 @@ std::string WebContent::scanResult(size_t index, const ScanResult& result)
 				 << upperExtension << "</a><small>&nbsp;["
 				 << fileSize.str() << "]</small>";
 		}
+
+		if (file.extension == "ply")
+		{
+			hasPly = true;
+		}
 	}
 
 	sstr << "<br><br>\
-	<form action=\"" << deleteUrl.str() << "#\" method=\"POST\">\
+	<div id=\"deleteButton\"><form action=\"" << deleteUrl.str() << "#\" method=\"POST\">\
 	<input type=\"Submit\" value=\"Delete\">\
-	</form>\
-	<div style=\"font-size: 12px\">" << dateStr << "\
+	</form></div>";
+
+	// Show the PLY view link
+	if (hasPly)
+	{
+		sstr << "<div id=\"viewButton\"><form action=\"/view\" method=\"POST\" enctype=\"application/x-www-form-urlencoded\">"
+			 << "<input type=\"Hidden\" name=\"id\" value=\"" << result.getScanDate() << "\">"
+			 << "<input style=\"left-padding: 20px\" type=\"Submit\" value=\"View\">"
+			 << "</form></div>";
+	}
+
+	sstr << "<div style=\"font-size: 12px\">" << dateStr << "\
 	</div></div>\
 	</span>\
 	<br>";
@@ -363,8 +413,10 @@ std::string WebContent::scanResult(size_t index, const ScanResult& result)
 	return sstr.str();
 }
 
-std::string WebContent::scanRunning(real progress, real remainingTime)
+std::string WebContent::scanRunning(Progress& progress, real remainingTime)
 {
+	real minRemaining = remainingTime / 60.0;
+
 	std::stringstream sstr;
 	sstr << "<!DOCTYPE html><html><head>"
 		 << "<meta http-equiv=\"refresh\" content=\"5\">"
@@ -373,11 +425,22 @@ std::string WebContent::scanRunning(real progress, real remainingTime)
 		 << JAVASCRIPT
 		 << std::endl
 		 << "</head>"
-	     << "<body><p>Scan is "
-	     << progress
-	     << "% complete with "
-	     << (remainingTime / 60.0)
-	     << " minutes remaining.</p>"
+	     << "<body><p><div style=\"float: left\">"
+	     << progress.getLabel()
+	     << " is "
+	     << progress.getPercent()
+	     << "% complete";
+
+		if (minRemaining > 0.01)
+		{
+			 sstr << " with "
+				  << minRemaining
+				  << " minutes remaining";
+		}
+
+	sstr << ".&nbsp;</div><div style=\"padding-left: 50px\"><form action=\"/preview\" method=\"GET\" enctype=\"application/x-www-form-urlencoded\">"
+		 << "<input type=\"submit\" value=\"Preview\">"
+		 << "</form></div><br><br>"
 	     << "<form action=\"/\" method=\"POST\" enctype=\"application/x-www-form-urlencoded\">"
 	     << "<input type=\"hidden\" name=\"cmd\" value=\"stopScan\">"
 	     << "<input type=\"submit\" value=\"Stop Scan\">"
@@ -385,6 +448,89 @@ std::string WebContent::scanRunning(real progress, real remainingTime)
 	     << "</body></html>";
 
 	     return sstr.str();
+}
+
+std::string WebContent::viewScan(const std::string& plyFilename)
+{
+	std::stringstream sstr;
+	sstr << "<!DOCTYPE html><html><head>"
+		 << CSS
+		 << std::endl
+		 << JAVASCRIPT
+		 << std::endl
+		 << "\
+		 </head><body>\
+		 <div style=\"position: absolute; left: 10px; top: 10px\"> <a href=\"/\">Back</a></div>\
+		 <script src=\"three.min.js\"></script>\
+		 <script src=\"OrbitControls.js\"></script>\
+		 <script src=\"PLYLoader.js\"></script>\
+		 <script>\
+		 var scene = new THREE.Scene();\
+		var camera = new THREE.PerspectiveCamera( 30, window.innerWidth/window.innerHeight, 1.0, 10000 );\
+		var controls;\
+\
+		var renderer = new THREE.WebGLRenderer({ alpha: true });\
+		renderer.setSize( window.innerWidth, window.innerHeight );\
+		renderer.setClearColor( 0x555555, 1);\
+\
+		document.body.appendChild( renderer.domElement );\
+		window.addEventListener( 'resize', onWindowResize, false );\
+\
+		var loader = new THREE.PLYLoader();\
+		loader.addEventListener( 'load', function ( event ) {\
+			var geometry = event.content;\
+			var pcMaterial = new THREE.PointCloudMaterial( {\
+			size: 1.75,\
+			vertexColors: THREE.VertexColors\
+		} );\
+			geometry.useColor = true;\
+			var mesh = new THREE.PointCloud( geometry, pcMaterial );\
+			scene.add( mesh );\
+		} );";
+
+		sstr << "loader.load( '" << plyFilename << "');";
+
+		sstr << "\
+		var cylHeight = 1;\
+		var cylRadius = 6 * 25.4;\
+		var cylGeometry = new THREE.CylinderGeometry( cylRadius, cylRadius, cylHeight, 64 );\
+		var cylMaterial = new THREE.MeshBasicMaterial( {color: 0x222222 } );\
+		var cylinder = new THREE.Mesh( cylGeometry, cylMaterial );\
+		cylinder.translateY( -cylHeight/2 );\
+		scene.add( cylinder );\
+\
+		var cylHeight2 = 8;\
+		var cylRadius2 = 6 * 25.4;\
+		var cylGeometry2 = new THREE.CylinderGeometry( cylRadius2, cylRadius2, cylHeight2, 64 );\
+		var cylMaterial2 = new THREE.MeshBasicMaterial( { color: 0xaaaaaa } );\
+		var cylinder2 = new THREE.Mesh( cylGeometry2, cylMaterial2 );\
+		cylinder2.translateY( -cylHeight2/2 - cylHeight );\
+		scene.add( cylinder2 );\
+\
+		camera.position.z = 350;\
+		camera.position.y = 450;\
+		controls = new THREE.OrbitControls( camera );\
+		controls.maxDistance = 1000;\
+\
+		var render = function () {\
+			requestAnimationFrame( render );\
+			renderer.render(scene, camera);\
+		};\
+\
+		render();\
+\
+		function onWindowResize() {\
+			windowHalfX = window.innerWidth / 2;\
+			windowHalfY = window.innerHeight / 2;\
+			camera.aspect = window.innerWidth / window.innerHeight;\
+			camera.updateProjectionMatrix();\
+			renderer.setSize( window.innerWidth, window.innerHeight );\
+		}\
+	</script>";
+
+	sstr << "</body></html>";
+
+	return sstr.str();
 }
 
 std::string WebContent::cal1(const std::string& inMessage)
@@ -513,6 +659,9 @@ std::string WebContent::setup(const std::string& message)
 	UnitOfLength srcUnit = UL_MILLIMETERS; // Lengths are always represented in millimeters internally
 	UnitOfLength dstUnit = setup->unitOfLength;
 
+	// Detect the amount of free space available
+	std::string freeSpaceMb = ToString(GetFreeSpaceMb());
+
 	std::stringstream sstr;
 	sstr << "<!DOCTYPE html><html><head>"
 		 << CSS
@@ -539,11 +688,13 @@ std::string WebContent::setup(const std::string& message)
 	sstr << setting(WebContent::SERIAL_NUMBER, "Serial Number", setup->serialNumber, SERIAL_NUMBER_DESCR);
 
 	std::string mmSel = setup->unitOfLength == UL_MILLIMETERS ? " SELECTED" : "";
+	std::string cmSel = setup->unitOfLength == UL_CENTIMETERS ? " SELECTED" : "";
 	std::string inSel = setup->unitOfLength == UL_INCHES ? " SELECTED" : "";
 
 	sstr << "<div><div class=\"settingsText\">Unit of Length</div>";
 	sstr << "<select name=\"" << WebContent::UNIT_OF_LENGTH << "\">";
 	sstr << "<option value=\"1\"" << mmSel << ">Millimeters</option>\r\n";
+	sstr << "<option value=\"3\"" << cmSel << ">Centimeters</option>\r\n";
 	sstr << "<option value=\"2\"" << inSel << ">Inches</option>\r\n";
 	sstr << "</select></div>";
 	sstr << "<div class=\"settingsDescr\">The unit of length for future values entered on the setup page.</div>\n";
@@ -569,6 +720,8 @@ std::string WebContent::setup(const std::string& message)
 	sstr << setting(WebContent::DIRECTION_PIN, "Motor Direction Pin", setup->motorDirPin, DIRECTION_PIN_DESCR);
 	sstr << setting(WebContent::RESPONSE_DELAY, "Motor Response Delay", setup->motorResponseDelay, RESPONSE_DELAY_DESCR, "&mu;s");
 	sstr << setting(WebContent::VERSION_NAME, "Firmware Version", FREELSS_VERSION_NAME, "The version of FreeLSS the scanner is running", "", true);
+	sstr << setting(WebContent::FREE_DISK_SPACE, "Free Space", freeSpaceMb, "The amount of free disk space available", "MB", true);
+
 
 	sstr << "<p><input type=\"hidden\" name=\"cmd\" value=\"save\">\
 <input class=\"submit\" type=\"submit\" value=\"Save\">\
@@ -580,6 +733,9 @@ std::string WebContent::setup(const std::string& message)
 
 std::string WebContent::settings(const std::string& message)
 {
+	const Setup * setup = Setup::get();
+	UnitOfLength srcUnit = UL_MILLIMETERS; // Lengths are always represented in millimeters internally
+	UnitOfLength dstUnit = setup->unitOfLength;
 
 	const Preset& preset = PresetManager::get()->getActivePreset();
 
@@ -652,6 +808,7 @@ std::string WebContent::settings(const std::string& message)
 	sstr << "</select></div>";
 	sstr << "<div class=\"settingsDescr\">The laser(s) that will be used when scanning.</div>\n";
 
+
 	//
 	// Camera Mode UI
 	//
@@ -674,17 +831,36 @@ std::string WebContent::settings(const std::string& message)
 
 	sstr << setting(WebContent::FRAMES_PER_REVOLUTION, "Frames Per Revolution", preset.framesPerRevolution, FRAMES_PER_REVOLUTION_DESCR);
 	sstr << setting(WebContent::LASER_MAGNITUDE_THRESHOLD, "Laser Threshold", preset.laserThreshold, LASER_MAGNITUDE_THRESHOLD_DESCR);
+	sstr << setting(WebContent::GROUND_PLANE_HEIGHT, "Ground Plane Height", ConvertUnitOfLength(preset.groundPlaneHeight, srcUnit, dstUnit), GROUND_PLANE_HEIGHT_DESCR,  ToString(dstUnit) + ".", false);
 	sstr << setting(WebContent::LASER_DELAY, "Laser Delay", preset.laserDelay, LASER_DELAY_DESCR, "&mu;s");
 	sstr << setting(WebContent::STABILITY_DELAY, "Stability Delay", preset.stabilityDelay, STABILITY_DELAY_DESCR, "&mu;s");
 	sstr << setting(WebContent::MAX_LASER_WIDTH, "Max Laser Width", preset.maxLaserWidth, MAX_LASER_WIDTH_DESCR, "px.");
 	sstr << setting(WebContent::MIN_LASER_WIDTH, "Min Laser Width", preset.minLaserWidth, MIN_LASER_WIDTH_DESCR, "px.");
+
+
+	//
+	// PLY Data Format UI
+	//
+	PlyDataFormat plyDataFormat = preset.plyDataFormat;
+	std::string plyAsciiSel  = plyDataFormat == PLY_ASCII  ? " SELECTED" : "";
+	std::string plyBinarySel = plyDataFormat == PLY_BINARY ? " SELECTED" : "";
+
 	sstr << checkbox(WebContent::GENERATE_PLY, "Generate PLY File", preset.generatePly, GENERATE_PLY_DESCR);
+
+	sstr << "<div><div class=\"settingsText\">PLY Data Format</div>";
+	sstr << "<select name=\"" << WebContent::PLY_DATA_FORMAT << "\">";
+	sstr << "<option value=\"0\"" << plyAsciiSel << ">ASCII</option>\r\n";
+	sstr << "<option value=\"1\"" << plyBinarySel << ">Binary</option>\r\n";
+	sstr << "</select></div>";
+	sstr << "<div class=\"settingsDescr\">" << WebContent::PLY_DATA_FORMAT_DESCR << "</div>\n";
+
 	sstr << checkbox(WebContent::GENERATE_STL, "Generate STL File", preset.generateStl, GENERATE_STL_DESCR);
 	sstr << checkbox(WebContent::GENERATE_XYZ, "Generate XYZ File", preset.generateXyz, GENERATE_XYZ_DESCR);
 	sstr << checkbox(WebContent::SEPARATE_LASERS_BY_COLOR, "Separate the Lasers", preset.laserMergeAction == Preset::LMA_SEPARATE_BY_COLOR, SEPARATE_LASERS_BY_COLOR_DESCR);
 
 	sstr << "</form>\
 <form action=\"/settings\" method=\"POST\" enctype=\"application/x-www-form-urlencoded\">\
+<p><br><br><a target=\"_\" href=\"/licenses.txt\">Licenses</a></p>\
 <p><br><br><br><form> <input type=\"hidden\" name=\"cmd\" value=\"shutdown\">\
 <input class=\"submit\" type=\"submit\" value=\"Shutdown\"></p></form>\
 </body></html>";

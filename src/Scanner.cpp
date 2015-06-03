@@ -27,10 +27,11 @@
 #include "Laser.h"
 #include "Camera.h"
 #include "PixelLocationWriter.h"
-#include "NeutralFileReader.h"
 #include "StlWriter.h"
 #include "XyzWriter.h"
 #include "LaserResultsMerger.h"
+#include "FileWriter.h"
+#include "Facetizer.h"
 
 namespace freelss
 {
@@ -44,7 +45,7 @@ static bool CompareScanResultFiles(const ScanResultFile& a, const ScanResultFile
 	return a.extension > b.extension;
 }
 
-static bool ComparePseudoSteps(const NeutralFileRecord& a, const NeutralFileRecord& b)
+static bool ComparePseudoSteps(const DataPoint& a, const DataPoint& b)
 {
 	if (a.pseudoFrame != b.pseudoFrame)
 	{
@@ -62,16 +63,17 @@ Scanner::Scanner() :
 	m_running(false),
 	m_range(360),
 	m_filename(""),
-	m_progress(0.0),
+	m_progress(),
 	m_status(),
 	m_maxNumFrameRetries(5),                    // TODO: Place this in Database
-	m_maxPercentPixelsOverThreshold(3),           // TODO: Place this in Database
+	m_maxNumFailedRows(10),                      // TODO: Place this in Database
 	m_columnPoints(NULL),
 	m_startTimeSec(0),
 	m_remainingTime(0),
 	m_firstRowRightLaserCol(0),
 	m_firstRowLeftLaserCol(0),
 	m_maxNumLocations(0),
+	m_maxFramesPerRevolution(0),
 	m_radiansBetweenLaserPlanes(0),
 	m_radiansPerFrame(0),
 	m_rightLaserLoc(),
@@ -81,8 +83,8 @@ Scanner::Scanner() :
 	m_rangeFout(),
 	m_numFramesBetweenLaserPlanes(0),
 	m_laserSelection(Laser::ALL_LASERS),
-	m_currentOperationName(""),
-	m_task(GENERATE_SCAN)
+	m_task(GENERATE_SCAN),
+	m_results()
 {
 	// Do nothing
 }
@@ -115,15 +117,9 @@ bool Scanner::isRunning()
 	return running;
 }
 
-real Scanner::getProgress()
+Progress& Scanner::getProgress()
 {
-	real progress;
-
-	m_status.enter();
-	progress = m_progress;
-	m_status.leave();
-
-	return progress;
+	return m_progress;
 }
 
 real Scanner::getRemainingTime()
@@ -157,21 +153,22 @@ void Scanner::prepareScan()
 {
 	m_status.enter();
 	m_running = true;
-	m_progress = 0.0;
+	m_progress.setPercent(0);
+
 	m_startTimeSec = GetTimeInSeconds();
 	m_remainingTime = 0;
 
 	if (m_task == Scanner::GENERATE_SCAN)
 	{
-		m_currentOperationName = "Scanning";
+		m_progress.setLabel("Scanning");
 	}
 	else if (m_task == Scanner::GENERATE_DEBUG)
 	{
-		m_currentOperationName = "Generating debug info";
+		m_progress.setLabel("Generating debug info");
 	}
 	else
 	{
-		m_currentOperationName = "Unknown";
+		m_progress.setLabel("Unknown");
 	}
 
 	// Get handles to our hardware devices
@@ -189,6 +186,22 @@ void Scanner::prepareScan()
 	m_columnPoints = new ColoredPoint[m_camera->getImageWidth()];
 
 	m_status.leave();
+}
+
+Scanner::LiveData Scanner::getLiveDataLock()
+{
+	m_results.enter();
+
+	Scanner::LiveData data;
+	data.leftLaserResults = &m_leftLaserResults;
+	data.rightLaserResults = &m_rightLaserResults;
+
+	return data;
+}
+
+void Scanner::releaseLiveDataLock()
+{
+	m_results.leave();
 }
 
 void Scanner::run()
@@ -259,26 +272,34 @@ void Scanner::run()
 		}
 	}
 
-	// The results vector
-	std::vector<NeutralFileRecord> leftLaserResults, rightLaserResults;
+	// Init the results vectors
+	m_results.enter();
+	m_leftLaserResults.clear();
+	m_rightLaserResults.clear();
+	m_results.leave();
+
 	int numFrames = 0;
 
-	int maxFramesPerRevolution = preset.framesPerRevolution;
-	if (maxFramesPerRevolution < 1)
+	m_maxFramesPerRevolution = preset.framesPerRevolution;
+	if (m_maxFramesPerRevolution < 1)
 	{
-		maxFramesPerRevolution = 1;
+		m_maxFramesPerRevolution = 1;
 	}
 
 	int stepsPerRevolution = Setup::get()->stepsPerRevolution;
-	if (maxFramesPerRevolution > stepsPerRevolution)
+	if (m_maxFramesPerRevolution > stepsPerRevolution)
 	{
-		maxFramesPerRevolution = stepsPerRevolution;
+		m_maxFramesPerRevolution = stepsPerRevolution;
 	}
 
 	try
 	{
 		// Enable the turn table motor
 		m_turnTable->setMotorEnabled(true);
+
+		// Wait a second in case the object shakes
+		Thread::usleep(1000000);
+
 		std::cout << "Enabled motor" << std::endl;
 
 		if (m_laser == NULL)
@@ -299,7 +320,7 @@ void Scanner::run()
 		float rangeRadians =  (m_range / 360) * (2 * PI);
 
 		// The number of steps for a single frame
-		int stepsPerFrame = ceil(stepsPerRevolution / (float)maxFramesPerRevolution);
+		int stepsPerFrame = ceil(stepsPerRevolution / (float)m_maxFramesPerRevolution);
 		if (stepsPerFrame < 1)
 		{
 			stepsPerFrame = 1;
@@ -330,7 +351,7 @@ void Scanner::run()
 				break;
 			}
 
-			singleScan(leftLaserResults, rightLaserResults, iFrame, rotation, frameRadians, leftLocMapper, rightLocMapper, &timingStats);
+			singleScan(iFrame, rotation, frameRadians, leftLocMapper, rightLocMapper, &timingStats);
 
 			rotation += frameRadians;
 
@@ -342,8 +363,9 @@ void Scanner::run()
 			double fullTimeSec = 100.0 / percentPerSecond;
 			double remainingSec = fullTimeSec - timeElapsed;
 
+			m_progress.setPercent(progress * 100);
+
 			m_status.enter();
-			m_progress = progress;
 			m_remainingTime = remainingSec;
 			m_status.leave();
 
@@ -358,7 +380,6 @@ void Scanner::run()
 		m_status.enter();
 		m_running = false;
 		m_status.leave();
-		finishWritingToOutput();
 
 		if (m_writeRangeCsvEnabled)
 		{
@@ -372,49 +393,91 @@ void Scanner::run()
 
 	m_turnTable->setMotorEnabled(false);
 
-	// Build the mesh
-	m_status.enter();
-	m_progress = 0.5;
-	m_currentOperationName = "Building mesh";
-	m_status.leave();
-
 	std::cout << "Merging laser results..." << std::endl;
 
 	time1 = GetTimeInSeconds();
 
 	// Merge the left and right lasers and sort the results
-	std::vector<NeutralFileRecord> results;
+	std::vector<DataPoint> results;
 	LaserResultsMerger merger;
-	merger.merge(results, leftLaserResults, rightLaserResults, maxFramesPerRevolution,
-			     m_numFramesBetweenLaserPlanes, Camera::getInstance()->getImageHeight(), preset.laserMergeAction);
+
+	m_results.enter();
+	merger.merge(results, m_leftLaserResults, m_rightLaserResults, m_maxFramesPerRevolution,
+			     m_numFramesBetweenLaserPlanes, Camera::getInstance()->getImageHeight(), preset.laserMergeAction, m_progress);
+	m_results.leave();
 
 	// Sort by pseudo-step and row
 	std::cout << "Sort 2... " << std::endl;
 	std::sort(results.begin(), results.end(), ComparePseudoSteps);
 	std::cout << "End Sort 2... " << std::endl;
 
-	std::cout << "Merged " << leftLaserResults.size() << " left laser and " << rightLaserResults.size() << " right laser results into " << results.size() << " results." << std::endl;
+	m_results.enter();
+
+	std::cout << "Merged " << m_leftLaserResults.size() << " left laser and " << m_rightLaserResults.size() << " right laser results into " << results.size() << " results." << std::endl;
+
+	m_leftLaserResults.clear();
+	m_rightLaserResults.clear();
+
+	m_results.leave();
+
 	std::cout << "Constructing mesh..." << std::endl;
 
 	timingStats.laserMergeTime += GetTimeInSeconds() - time1;
+
+	// Mesh the point cloud
+	FaceMap faces;
+	if (preset.generatePly || preset.generateStl)
+	{
+		Facetizer facetizer;
+
+		time1 = GetTimeInSeconds();
+		m_progress.setLabel("Facetizing Point Cloud");
+		facetizer.facetize(faces, results, m_range > 359, m_progress, true);
+		timingStats.facetizationTime += GetTimeInSeconds() - time1;
+	}
 
 	// Write the PLY file
 	std::cout << "Starting output thread..." << std::endl;
 	if (preset.generatePly)
 	{
-		std::cout << "Writing PLY file..." << std::endl;
+		m_progress.setLabel("Generating PLY file");
+		m_progress.setPercent(0);
+
+		std::string plyFilename = m_filename + ".ply";
+
+		std::cout << "Writing PLY file... " << plyFilename <<  std::endl;
 		time1 = GetTimeInSeconds();
 
-		m_scanResultsWriter.setBaseFilePath(m_filename);
-		m_scanResultsWriter.execute();
-
-		for (size_t iRec = 0; iRec < results.size(); iRec++)
+		FileWriter plyOut(plyFilename.c_str());
+		if (!plyOut.is_open())
 		{
-			m_scanResultsWriter.write(results[iRec]);
+			throw Exception("Error opening file for writing: " + plyFilename);
 		}
 
-		finishWritingToOutput();
-		timingStats.fileWritingTime += GetTimeInSeconds() - time1;
+		/** Writes the results to a PLY file */
+		PlyWriter plyWriter;
+		plyWriter.setDataFormat(preset.plyDataFormat);
+		plyWriter.setTotalNumPoints((int)results.size());
+		plyWriter.setTotalNumFacesFromFaceMap(faces);
+		plyWriter.begin(&plyOut);
+
+		real percent = 0;
+		for (size_t iRec = 0; iRec < results.size(); iRec++)
+		{
+			real newPct = 100.0f * iRec / results.size();
+			if (newPct - percent > 0.1)
+			{
+				m_progress.setPercent(newPct);
+				percent = newPct;
+			}
+
+			plyWriter.writePoints(&results[iRec].point, 1);
+		}
+
+		plyWriter.writeFaces(faces);
+		plyWriter.end();
+		plyOut.close();
+		timingStats.plyWritingTime += GetTimeInSeconds() - time1;
 	}
 
 	// Generate the XYZ file
@@ -423,8 +486,8 @@ void Scanner::run()
 		std::cout << "Generating XYZ file..." << std::endl;
 		time1 = GetTimeInSeconds();
 		XyzWriter xyzWriter;
-		xyzWriter.write(m_filename, results);
-		timingStats.fileWritingTime += GetTimeInSeconds() - time1;
+		xyzWriter.write(m_filename, results, m_progress);
+		timingStats.xyzWritingTime += GetTimeInSeconds() - time1;
 	}
 
 	// Generate the STL file
@@ -433,78 +496,183 @@ void Scanner::run()
 		std::cout << "Generating STL mesh..." << std::endl;
 		time1 = GetTimeInSeconds();
 		StlWriter stlWriter;
-		stlWriter.write(m_filename, results, m_range > 359);
-		timingStats.meshBuildTime = GetTimeInSeconds() - time1;
+		stlWriter.write(m_filename, results, faces, m_progress);
+		timingStats.stlWritingTime = GetTimeInSeconds() - time1;
 	}
 
 	logTimingStats(timingStats);
 
+	m_progress.setPercent(100);
+
 	m_status.enter();
 	m_running = false;
-	m_progress = 1.0;
 	m_status.leave();
 
 	std::cout << "Done." << std::endl;
 }
 
-
-
-void Scanner::finishWritingToOutput()
-{
-	// Wait for all the I/O writing to complete
-	while (m_scanResultsWriter.getNumPendingRecords() > 0)
-	{
-		Thread::usleep(100000);
-	}
-
-	// Wait for the thread to stop
-	m_scanResultsWriter.stop();
-	m_scanResultsWriter.join();
-}
-
 void Scanner::generateDebugInfo(Laser::LaserSide laserSide)
 {
+	Setup * setup = Setup::get();
+
 	// Prepare for scanning
 	prepareScan();
+
+	std::string debuggingCsv = std::string(DEBUG_OUTPUT_DIR) + "/0.csv";
 
 	m_laser->turnOff(Laser::ALL_LASERS);
 	acquireImage(&m_image1);
 
-	m_laser->turnOn(laserSide);
-	acquireImage(&m_image2);
+	Image leftDebuggingImage;
+	std::vector<PixelLocation> leftLocations (m_maxNumLocations);
+	int numLeftLocations = 0;
 
-	m_laser->turnOff(laserSide);
+	if (laserSide == Laser::LEFT_LASER  || laserSide == Laser::ALL_LASERS)
+	{
+		m_laser->turnOn(Laser::LEFT_LASER);
+		acquireImage(&m_image2);
 
+		m_laser->turnOff(Laser::LEFT_LASER);
+
+		int firstRowLaserCol = m_camera->getImageWidth() * 0.5;
+		int numRowsBadFromColor = 0;
+		int numRowsBadFromNumRanges = 0;
+
+		numLeftLocations = m_imageProcessor.process(m_image1,
+													m_image2,
+													&leftDebuggingImage,
+													&leftLocations.front(),
+													m_maxNumLocations,
+													firstRowLaserCol,
+													numRowsBadFromColor,
+													numRowsBadFromNumRanges,
+													debuggingCsv.c_str());
+
+		// If we had major problems with this frame, try it again
+		std::cout << "numRowsBadFromColor: " << numRowsBadFromColor << std::endl;
+		std::cout << "numRowsBadFromNumRanges: " << numRowsBadFromNumRanges << std::endl;
+
+		// Map the points so that points below the ground plane and outside the max object size are omitted
+		int numLocationsMapped = 0;
+		LocationMapper locMapper(setup->leftLaserLocation, setup->cameraLocation);
+		locMapper.mapPoints(&leftLocations.front(), &m_image1, m_columnPoints, numLeftLocations, numLocationsMapped);
+		numLeftLocations = numLocationsMapped;
+	}
+
+	Image rightDebuggingImage;
+	std::vector<PixelLocation> rightLocations(m_maxNumLocations);
+	int numRightLocations = 0;
+	if (laserSide == Laser::RIGHT_LASER  || laserSide == Laser::ALL_LASERS)
+	{
+		m_laser->turnOn(Laser::RIGHT_LASER);
+		acquireImage(&m_image2);
+
+		m_laser->turnOff(Laser::RIGHT_LASER);
+
+		int firstRowLaserCol = m_camera->getImageWidth() * 0.5;
+		int numRowsBadFromColor = 0;
+		int numRowsBadFromNumRanges = 0;
+
+		numRightLocations = m_imageProcessor.process(m_image1,
+													 m_image2,
+													 &rightDebuggingImage,
+													 &rightLocations.front(),
+													 m_maxNumLocations,
+													 firstRowLaserCol,
+													 numRowsBadFromColor,
+													 numRowsBadFromNumRanges,
+													 debuggingCsv.c_str());
+
+		// If we had major problems with this frame, try it again
+		std::cout << "numRowsBadFromColor: " << numRowsBadFromColor << std::endl;
+		std::cout << "numRowsBadFromNumRanges: " << numRowsBadFromNumRanges << std::endl;
+
+
+		// Map the points so that points below the ground plane and outside the max object size are omitted
+		int numLocationsMapped = 0;
+		LocationMapper locMapper(setup->rightLaserLocation, setup->cameraLocation);
+		locMapper.mapPoints(&rightLocations.front(), &m_image1, m_columnPoints, numRightLocations, numLocationsMapped);
+		numRightLocations = numLocationsMapped;
+	}
+
+	//
+	// Merge the two debugging images
+	//
 	Image debuggingImage;
-
-	std::string debuggingCsv = std::string(DEBUG_OUTPUT_DIR) + "/0.csv";
-
-	int firstRowLaserCol = m_camera->getImageWidth() * 0.5;
-	real percentPixelsOverThreshold = 0;
-	int numLocations = m_imageProcessor.process(m_image1,
-											    m_image2,
-												&debuggingImage,
-												m_laserLocations,
-												m_maxNumLocations,
-												firstRowLaserCol,
-												percentPixelsOverThreshold,
-												debuggingCsv.c_str());
+	mergeDebuggingImages(debuggingImage, leftDebuggingImage, rightDebuggingImage, laserSide);
 
 	std::string baseFilename = std::string(DEBUG_OUTPUT_DIR) + "/";
 
 	// Overlay the pixels onto the debug image and write that as a new image
 	PixelLocationWriter locWriter;
-	Image::overlayPixels(debuggingImage, m_laserLocations, numLocations);
+	Image::overlayPixels(debuggingImage, &rightLocations.front(), numRightLocations);
+	Image::overlayPixels(debuggingImage, &leftLocations.front(), numLeftLocations);
 	locWriter.writeImage(debuggingImage, debuggingImage.getWidth(), debuggingImage.getHeight(), baseFilename + "5.png");
+
+	m_progress.setPercent(100);
 
 	m_status.enter();
 	m_running = false;
-	m_progress = 1.0;
 	m_status.leave();
 	std::cout << "Done." << std::endl;
 }
 
-void Scanner::singleScan(std::vector<NeutralFileRecord> & leftLaserResults, std::vector<NeutralFileRecord> & rightLaserResults, int frame, float rotation, float frameRotation,
+void Scanner::mergeDebuggingImages(Image& outImage, const Image& leftDebuggingImage, const Image& rightDebuggingImage, Laser::LaserSide laserSide)
+{
+
+	if (laserSide == Laser::RIGHT_LASER)
+	{
+		memcpy(outImage.getPixels(), rightDebuggingImage.getPixels(), outImage.getPixelBufferSize());
+	}
+	else if (laserSide == Laser::LEFT_LASER)
+	{
+		memcpy(outImage.getPixels(), leftDebuggingImage.getPixels(), outImage.getPixelBufferSize());
+	}
+	else if (laserSide == Laser::ALL_LASERS)
+	{
+		//
+		// Merge the two images with a MAX operator
+		//
+		unsigned char * left = leftDebuggingImage.getPixels();
+		unsigned char * right = rightDebuggingImage.getPixels();
+		unsigned numPixels = leftDebuggingImage.getWidth() * leftDebuggingImage.getHeight();
+		unsigned char * out = outImage.getPixels();
+		for (unsigned iPx = 0; iPx < numPixels; iPx++)
+		{
+			int lr = (int) left[0];
+			int lg = (int) left[1];
+			int lb = (int) left[2];
+			int leftMagSq = lr * lr + lg * lg + lb * lb;
+
+			int rr = (int) right[0];
+			int rg = (int) right[1];
+			int rb = (int) right[2];
+			int rightMagSq = rr * rr + rg * rg + rb * rb;
+
+			if (leftMagSq > rightMagSq)
+			{
+				out[0] = (unsigned char) lr;
+				out[1] = (unsigned char) lg;
+				out[2] = (unsigned char) lb;
+			}
+			else
+			{
+				out[0] = (unsigned char) rr;
+				out[1] = (unsigned char) rg;
+				out[2] = (unsigned char) rb;
+			}
+
+			left += 3;
+			right += 3;
+			out += 3;
+		}
+	}
+	else
+	{
+		throw Exception("Unsupported LaserSide");
+	}
+}
+void Scanner::singleScan(int frame, float rotation, float frameRotation,
 		                 LocationMapper& leftLocMapper, LocationMapper& rightLocMapper, TimingStats * timingStats)
 {
 	double time1 = GetTimeInSeconds();
@@ -551,11 +719,14 @@ void Scanner::singleScan(std::vector<NeutralFileRecord> & leftLaserResults, std:
 			timingStats->laserTime += GetTimeInSeconds() - time1;
 
 			// Process the right laser results
-			goodResult = processScan(rightLaserResults, frame, rotation, rightLocMapper, Laser::RIGHT_LASER, m_firstRowRightLaserCol, timingStats);
+			goodResult = processScan(m_rightLaserResults, frame, rotation, rightLocMapper, Laser::RIGHT_LASER, m_firstRowRightLaserCol, timingStats);
 
 			// If it didn't succeed, take the first image again
 			if (!goodResult)
 			{
+				// Wait some period of time for the cause of the disruption to go away
+				Thread::usleep(1000000);
+
 				// Take a picture with the laser off
 				time1 = GetTimeInSeconds();
 				acquireImage(&m_image1);
@@ -587,7 +758,7 @@ void Scanner::singleScan(std::vector<NeutralFileRecord> & leftLaserResults, std:
 			timingStats->laserTime += GetTimeInSeconds() - time1;
 
 			// Process the left laser results
-			goodResult = processScan(leftLaserResults, frame, rotation, leftLocMapper, Laser::LEFT_LASER, m_firstRowLeftLaserCol, timingStats);
+			goodResult = processScan(m_leftLaserResults, frame, rotation, leftLocMapper, Laser::LEFT_LASER, m_firstRowLeftLaserCol, timingStats);
 
 			// If it didn't succeed, take the first image again
 			if (!goodResult)
@@ -601,10 +772,11 @@ void Scanner::singleScan(std::vector<NeutralFileRecord> & leftLaserResults, std:
 	}
 }
 
-bool Scanner::processScan(std::vector<NeutralFileRecord> & results, int frame, float rotation, LocationMapper& locMapper, Laser::LaserSide laserSide, int & firstRowLaserCol, TimingStats * timingStats)
+bool Scanner::processScan(std::vector<DataPoint> & results, int frame, float rotation, LocationMapper& locMapper, Laser::LaserSide laserSide, int & firstRowLaserCol, TimingStats * timingStats)
 {
 	int numLocationsMapped = 0;
-	real percentPixelsOverThreshold = 0;
+	int numRowsBadFromColor = 0;
+	int numRowsBadFromNumRanges = 0;
 
 	// Send the pictures off for processing
 	double time1 = GetTimeInSeconds();
@@ -614,17 +786,22 @@ bool Scanner::processScan(std::vector<NeutralFileRecord> & results, int frame, f
 												m_laserLocations,
 												m_maxNumLocations,
 												firstRowLaserCol,
-												percentPixelsOverThreshold,
+												numRowsBadFromColor,
+												numRowsBadFromNumRanges,
 												NULL);
 
 	timingStats->imageProcessingTime += GetTimeInSeconds() - time1;
 
 	// If we had major problems with this frame, try it again
-	std::cout << "percentPixelsOverThreshold: " << percentPixelsOverThreshold << std::endl;
-	if (percentPixelsOverThreshold > m_maxPercentPixelsOverThreshold)
+	std::cout << "numRowsBadFromColor: " << numRowsBadFromColor << std::endl;
+	std::cout << "numRowsBadFromNumRanges: " << numRowsBadFromNumRanges << std::endl;
+
+	if (numRowsBadFromNumRanges > m_maxNumFailedRows)
 	{
-		std::cout << "!! Many bad laser locations suspected, pctOverThreshold=" << percentPixelsOverThreshold
-				  << ", maxPct=" << m_maxPercentPixelsOverThreshold << ", rescanning..." << std::endl;
+		std::cout << "!! Too many bad laser locations suspected"
+				  << ", numRowsBadFromColor=" << numRowsBadFromColor
+				  << ", numRowsBadFromNumRanges=" << numRowsBadFromNumRanges
+				  << ", rescanning..." << std::endl;
 
 		timingStats->numFrameRetries++;
 
@@ -667,21 +844,29 @@ bool Scanner::processScan(std::vector<NeutralFileRecord> & results, int frame, f
 		// Rotate the points
 		rotatePoints(m_columnPoints, rotation, numLocationsMapped);
 
-		timingStats->pointProcessingTime += GetTimeInSeconds() - time1;
-
-		// Write to the neutral file
-		time1 = GetTimeInSeconds();
+		std::vector<DataPoint>  rawResults;
 		for (int iLoc = 0; iLoc < numLocationsMapped; iLoc++)
 		{
-			NeutralFileRecord record;
+			DataPoint record;
 			record.pixel = m_laserLocations[iLoc];
 			record.point = m_columnPoints[iLoc];
 			record.rotation = laserSide == Laser::RIGHT_LASER ? rotation : rotation + m_radiansBetweenLaserPlanes;
 			record.frame = frame;
 			record.laserSide = (int) laserSide;
-			results.push_back(record);
+			rawResults.push_back(record);
 		}
-		timingStats->fileWritingTime += GetTimeInSeconds() - time1;
+
+		uint32 maxNumRows = Camera::getInstance()->getImageHeight();
+		uint32 numRowBins = MAX(400, m_maxFramesPerRevolution / 4);
+
+		time1 = GetTimeInSeconds();
+
+		// Reduce the number of result rows and filter out some of the noise
+		m_results.enter();
+		DataPoint::lowpassFilter(results, rawResults, maxNumRows, numRowBins);
+		m_results.leave();
+
+		timingStats->pointProcessingTime += GetTimeInSeconds() - time1;
 	}
 
 	return true;
@@ -769,8 +954,8 @@ void Scanner::logTimingStats(const Scanner::TimingStats& stats)
 	double now = GetTimeInSeconds();
 	double totalTime = now - stats.startTime;
 
-	double accountedTime = stats.meshBuildTime + stats.imageAcquisitionTime + stats.imageProcessingTime + stats.pointMappingTime
-			+ stats.pointProcessingTime + stats.rotationTime + stats.fileWritingTime + stats.laserTime + stats.laserMergeTime;
+	double accountedTime = stats.xyzWritingTime + stats.facetizationTime + stats.stlWritingTime + stats.imageAcquisitionTime + stats.imageProcessingTime + stats.pointMappingTime
+			+ stats.pointProcessingTime + stats.rotationTime + stats.plyWritingTime + stats.laserTime + stats.laserMergeTime;
 
 	double unaccountedTime = totalTime - accountedTime;
 	double rate = totalTime / stats.numFrames;
@@ -784,8 +969,10 @@ void Scanner::logTimingStats(const Scanner::TimingStats& stats)
 	std::cout << "Point Rotating:\t" << (100.0 * stats.pointProcessingTime / totalTime) << "%" << std::endl;
 	std::cout << "Table Rotation:\t" << (100.0 * stats.rotationTime / totalTime) << "%" << std::endl;
 	std::cout << "Laser Merging:\t" << (100.0 * stats.laserMergeTime / totalTime) << "%" << std::endl;
-	std::cout << "File Writing:\t" << (100.0 * stats.fileWritingTime / totalTime) << "%" << std::endl;
-	std::cout << "Mesh Construction:\t" << (100.0 * stats.meshBuildTime / totalTime) << "%" << std::endl;
+	std::cout << "PLY Writing:\t" << (100.0 * stats.plyWritingTime / totalTime) << "%" << std::endl;
+	std::cout << "STL Writing:\t" << (100.0 * stats.stlWritingTime / totalTime) << "%" << std::endl;
+	std::cout << "XYZ Writing:\t" << (100.0 * stats.xyzWritingTime / totalTime) << "%" << std::endl;
+	std::cout << "Facetization:\t" << (100.0 * stats.facetizationTime / totalTime) << "%" << std::endl;
 	std::cout << "Num Frame Retries:\t" << stats.numFrameRetries << std::endl;
 	std::cout << "Num Frames:\t" << stats.numFrames << std::endl;
 	std::cout << "Total Time (min):\t" << (totalTime / 60.0) << std::endl << std::endl;
@@ -854,16 +1041,6 @@ std::vector<ScanResult> Scanner::getPastScanResults()
 	return results;
 }
 
-std::string Scanner::getCurrentOperationName()
-{
-	std::string operation;
-
-	m_status.enter();
-	operation = m_currentOperationName;
-	m_status.leave();
-
-	return operation;
-}
 
 void Scanner::acquireImage(Image * image)
 {

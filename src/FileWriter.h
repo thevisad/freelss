@@ -1,6 +1,6 @@
 /*
  ****************************************************************************
- *  Copyright (c) 2014 Uriah Liggett <freelaserscanner@gmail.com>           *
+ *  Copyright (c) 2015 Uriah Liggett <freelaserscanner@gmail.com>           *
  *	This file is part of FreeLSS.                                           *
  *                                                                          *
  *  FreeLSS is free software: you can redistribute it and/or modify         *
@@ -17,42 +17,23 @@
  *   along with FreeLSS.  If not, see <http://www.gnu.org/licenses/>.       *
  ****************************************************************************
 */
-
 #pragma once
 
-#include "Preset.h"
-#include "Progress.h"
+#include "IWriter.h"
 
 namespace freelss
 {
 
-/**
- * This class merges the left and right laser results into a single result set.
- * It uses the results from the left laser in places where the right laser does
- * not have information.  It utilizes a volumetric masking technique to determine
- * if the right laser already has information in a given area.
- */
-class LaserResultsMerger
+class FileWriter : public IWriter
 {
 public:
-	LaserResultsMerger();
-
-	void merge(std::vector<DataPoint> & out,
-            std::vector<DataPoint> & leftLaserResults,
-            std::vector<DataPoint> & rightLaserResults,
-            int numFramesPerRevolution,
-            int numFramesBetweenLaserPlanes,
-            int maxPointY,
-            Preset::LaserMergeAction mergeAction,
-            Progress& progress);
+	FileWriter (const char * filename);
+	void write(const char * data, size_t len);
+	void close();
+	bool is_open() const;
 
 private:
-
-	int getIndex(const DataPoint& record);
-
-	int m_numFramesBetweenLaserPlanes;
-	real m_numFramesPerRevolution;
-	real m_maxPointY;
+	std::ofstream m_fout;
 };
 
 }

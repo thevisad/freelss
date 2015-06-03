@@ -11,11 +11,12 @@ OBJECTS=WebContent.o PropertyReaderWriter.o Main.o \
 	HttpServer.o CriticalSection.o Scanner.o Image.o ImageProcessor.o \
 	Thread.o A4988TurnTable.o RelayLaser.o LocationMapper.o \
 	PlyWriter.o Calibrator.o RaspistillCamera.o \
-	NeutralFileWriter.o NeutralFileReader.o RaspicamCamera.o \
-	Camera.o ScanResultsWriter.o MmalStillCamera.o \
+	RaspicamCamera.o \
+	Camera.o MmalStillCamera.o \
 	MmalVideoCamera.o PixelLocationWriter.o StlWriter.o TurnTable.o \
 	Laser.o Preset.o PresetManager.o Setup.o LaserResultsMerger.o\
-	XyzWriter.o UpdateManager.o
+	XyzWriter.o UpdateManager.o Progress.o FileWriter.o MemWriter.o \
+	Facetizer.o
 
 all: freelss 
 
@@ -82,17 +83,8 @@ WebContent.o: WebContent.cpp WebContent.h Main.h
 Calibrator.o: Calibrator.cpp Calibrator.h Main.h
 	$(CC) -c $(CFLAGS) Calibrator.cpp
 
-NeutralFileWriter.o: NeutralFileWriter.cpp NeutralFileWriter.h Main.h
-	$(CC) -c $(CFLAGS) NeutralFileWriter.cpp
-
-NeutralFileReader.o: NeutralFileReader.cpp NeutralFileReader.h Main.h
-	$(CC) -c $(CFLAGS) NeutralFileReader.cpp
-
 Camera.o: Camera.cpp Camera.h Main.h
 	$(CC) -c $(CFLAGS) Camera.cpp
-
-ScanResultsWriter.o: ScanResultsWriter.cpp ScanResultsWriter.h Main.h
-	$(CC) -c $(CFLAGS) ScanResultsWriter.cpp
 
 StlWriter.o: StlWriter.cpp StlWriter.h Main.h
 	$(CC) -c $(CFLAGS) StlWriter.cpp
@@ -121,12 +113,24 @@ XyzWriter.o: XyzWriter.cpp XyzWriter.h Main.h
 UpdateManager.o: UpdateManager.cpp UpdateManager.h Main.h
 	$(CC) -c $(CFLAGS) UpdateManager.cpp
 
+Progress.o: Progress.cpp Progress.h Main.h
+	$(CC) -c $(CFLAGS) Progress.cpp
+
+FileWriter.o: FileWriter.cpp FileWriter.h Main.h
+	$(CC) -c $(CFLAGS) FileWriter.cpp
+
+MemWriter.o: MemWriter.cpp MemWriter.h Main.h
+	$(CC) -c $(CFLAGS) MemWriter.cpp
+
+Facetizer.o: Facetizer.cpp Facetizer.h Main.h
+	$(CC) -c $(CFLAGS) Facetizer.cpp
+
 github:
 	mkdir -p ../../github
 	mkdir -p ../../github/src
 	mkdir -p ../../github/contrib
 	cp -f *.h *.cpp Makefile ../../github/src
-	cp -f ../contrib/*.hpp ../../github/contrib
+	cp -f ../contrib/*.h ../contrib/*.hpp ../../github/contrib
 
 run: freelss
 	sudo ./freelss

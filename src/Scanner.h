@@ -23,8 +23,9 @@
 #include "ImageProcessor.h"
 #include "Thread.h"
 #include "CriticalSection.h"
-#include "ScanResultsWriter.h"
+#include "PlyWriter.h"
 #include "Laser.h"
+#include "Progress.h"
 
 namespace freelss
 {
@@ -70,16 +71,26 @@ public:
 	bool isRunning();
 
 	/** Returns the progress of the current scan from 0 to 1 */
-	real getProgress();
+	Progress& getProgress();
 
 	/** Get the remaining time for the scan in seconds */
 	real getRemainingTime();
 
-	/** Returns the name of the current operation taking place */
-	std::string getCurrentOperationName();
-
 	/** Generate debugging images and information */
 	void generateDebugInfo(Laser::LaserSide laserSide);
+
+	/** The live data from the scanner */
+	struct LiveData
+	{
+		std::vector<DataPoint> * leftLaserResults;
+		std::vector<DataPoint> * rightLaserResults;
+	};
+
+	/** Returns the data being scanned and locks all other access to it */
+	Scanner::LiveData getLiveDataLock();
+
+	/** Releases the lock on the data */
+	void releaseLiveDataLock();
 
 private:
 	struct TimingStats
@@ -90,17 +101,17 @@ private:
 		double rotationTime;
 		double startTime;
 		double pointProcessingTime;
-		double fileWritingTime;
-		double meshBuildTime;
+		double plyWritingTime;
+		double stlWritingTime;
+		double xyzWritingTime;
+		double facetizationTime;
 		double laserTime;
 		double laserMergeTime;
 		int numFrameRetries;
 		int numFrames;
 	};
 
-	void singleScan(std::vector<NeutralFileRecord> & leftLaserResults,
-			        std::vector<NeutralFileRecord> & rightLaserResults,
-					int frame,
+	void singleScan(int frame,
 			        float rotation,
 			        float stepRotation,
 			        LocationMapper& leftLocMapper,
@@ -111,21 +122,14 @@ private:
 	/** Free the points data */
 	void clearPoints();
 
-	void finishWritingToOutput();
-
 	/**
 	 * Returns true if the scan was processed successfully and false if there was a problem and the frame needs to be again.
 	 */
-	bool processScan(std::vector<NeutralFileRecord> & results, int frame, float rotation, LocationMapper& locMapper, Laser::LaserSide laserSide, int & firstRowLaserCol, TimingStats * timingStats);
+	bool processScan(std::vector<DataPoint> & results, int frame, float rotation, LocationMapper& locMapper, Laser::LaserSide laserSide, int & firstRowLaserCol, TimingStats * timingStats);
 
 	void writeRangePoints(ColoredPoint * points, int numLocationsMapped,Laser::LaserSide laserSide);
 
-private:
-	/** Unowned objects */
-	Laser * m_laser;
-	Camera * m_camera;
-	TurnTable * m_turnTable;
-private:
+	void mergeDebuggingImages(Image& outImage, const Image& leftDebuggingImage, const Image& rightDebuggingImage, Laser::LaserSide laserSide);
 
 	/**
 	 *  Prepares the object for scanning.
@@ -136,6 +140,13 @@ private:
 	 * Acquires an image from the camera.
 	 */
 	void acquireImage(Image * image);
+private:
+	/** Unowned objects */
+	Laser * m_laser;
+	Camera * m_camera;
+	TurnTable * m_turnTable;
+
+private:
 
 	/** Array of laser locations */
 	PixelLocation * m_laserLocations;
@@ -158,7 +169,7 @@ private:
 	std::string m_filename;
 
 	/** The progress of the current scan */
-	real m_progress;
+	Progress m_progress;
 
 	/** Protection for the running, progress, and any other status parameters */
 	CriticalSection m_status;
@@ -166,8 +177,8 @@ private:
 	/** The maximum number of times to try a frame (at a particular rotation) before giving up */
 	const int m_maxNumFrameRetries;
 
-	/** The threshold for percentage of pixels over the threshold */
-	const real m_maxPercentPixelsOverThreshold;
+	/** The maximum number of failed laser detection rows before */
+	const real m_maxNumFailedRows;
 
 	/** The image points for every column */
 	ColoredPoint * m_columnPoints;
@@ -184,11 +195,11 @@ private:
 	/** Location of the first left laser line detected in the last image */
 	int m_firstRowLeftLaserCol;
 
-	/** Writes the results to a neutral file, PLY file, or other output file */
-	ScanResultsWriter m_scanResultsWriter;
-
 	/** Max number of pixel locations */
 	unsigned m_maxNumLocations;
+
+	/** The max number of frames per revolution */
+	int m_maxFramesPerRevolution;
 
 	/** The angle between the left and right laser planes */
 	real m_radiansBetweenLaserPlanes;
@@ -217,11 +228,17 @@ private:
 	/** The laser to scan with */
 	Laser::LaserSide m_laserSelection;
 
-	/** The name of current operation taking place */
-	std::string m_currentOperationName;
-
 	/** The task to perform */
 	Scanner::Task m_task;
+
+	/** Left laser results */
+	std::vector<DataPoint> m_leftLaserResults;
+
+	/** Right laser results */
+	std::vector<DataPoint> m_rightLaserResults;
+
+	/** Protection for the the 3D result data */
+	CriticalSection m_results;
 };
 
 }

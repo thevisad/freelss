@@ -18,34 +18,57 @@
  ****************************************************************************
 */
 
-#pragma once
+#include "Main.h"
+#include "Progress.h"
 
 namespace freelss
 {
 
-class NeutralFileWriter
+
+Progress::Progress() :
+	m_percent(0),
+	m_label(""),
+	m_cs()
 {
-public:
-	NeutralFileWriter();
-	~NeutralFileWriter();
+	// Do nothing
+}
 
-	void beginBatch();
-	void commit();
-	void open(const std::string& filename);
-	void close();
-	void write(const NeutralFileRecord& record);
-private:
 
-	void prepareStatement();
+real Progress::getPercent()
+{
+	real out;
 
-	/** The SQL for creating the database */
-	static const char * CREATE_DATABASE_SQL;
+	m_cs.enter();
+	out = m_percent;
+	m_cs.leave();
 
-	/** The Sqlite database */
-	sqlite3 * m_db;
+	return out;
+}
 
-	/** The prepared statement */
-	sqlite3_stmt * m_stmt;
-};
+std::string Progress::getLabel()
+{
+	std::string out;
+
+	m_cs.enter();
+	out = m_label;
+	m_cs.leave();
+
+	return out;
+}
+
+void Progress::setPercent(real percent)
+{
+	m_cs.enter();
+	m_percent = percent;
+	m_cs.leave();
+}
+
+void Progress::setLabel(const std::string& label)
+{
+	m_cs.enter();
+	std::cout << label << "..." << std::endl;
+	m_label = label;
+	m_cs.leave();
+}
 
 }

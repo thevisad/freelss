@@ -21,12 +21,22 @@
 #include "Main.h"
 #include "XyzWriter.h"
 #include "Camera.h"
+#include "Progress.h"
 
 namespace freelss
 {
 
-void XyzWriter::write(const std::string& baseFilename, const std::vector<NeutralFileRecord>& results)
+void XyzWriter::write(const std::string& baseFilename, const std::vector<DataPoint>& results, Progress& progress)
 {
+	// Sanity check
+	if (results.empty())
+	{
+		return;
+	}
+
+	progress.setLabel("Generating XYZ file");
+	progress.setPercent(0);
+
 	std::string xyzFilename = baseFilename + ".xyz";
 	std::ofstream xyz (xyzFilename.c_str());
 	if (!xyz.is_open())
@@ -39,21 +49,27 @@ void XyzWriter::write(const std::string& baseFilename, const std::vector<Neutral
 
 	try
 	{
-		int iFrame = 0;
-
-		std::vector<NeutralFileRecord> frameA;
-		std::vector<NeutralFileRecord> currentFrame;
+		std::vector<DataPoint> frameA;
+		std::vector<DataPoint> currentFrame;
 
 		size_t resultIndex = 0;
-		while (NeutralFileRecord::readNextFrame(frameA, results, resultIndex))
+		real percent = 0;
+		while (DataPoint::readNextFrame(frameA, results, resultIndex))
 		{
+			real newPct = 100.0f * resultIndex / results.size();
+			if (newPct - percent > 0.1)
+			{
+				progress.setPercent(newPct);
+				percent = newPct;
+			}
+
 			// Reduce the number of result rows and filter out some of the noise
-			NeutralFileRecord::lowpassFilter(currentFrame, frameA, maxNumRows, numRowBins);
+			DataPoint::lowpassFilter(currentFrame, frameA, maxNumRows, numRowBins);
 
 			// Write the filtered results to the XYZ file
 			for (size_t iRec = 0; iRec < currentFrame.size(); iRec++)
 			{
-				const NeutralFileRecord& rec = currentFrame[iRec];
+				const DataPoint& rec = currentFrame[iRec];
 				const ColoredPoint & pt = rec.point;
 
 				xyz << pt.x        << " " << pt.y        << " " << pt.z        << " "
