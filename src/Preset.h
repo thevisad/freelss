@@ -61,13 +61,13 @@ public:
 	real maxObjectSize;
 	real maxTriangleEdgeLength;
 	int numLaserRowBins;
-	int laserDelay;
 	int stabilityDelay;
 	int id;
 	int framesPerRevolution;
 	bool generateXyz;
 	bool generateStl;
 	bool generatePly;
+	bool enableBurstModeForStillImages;
 	real groundPlaneHeight;
 	LaserMergeAction laserMergeAction;
 	PlyDataFormat plyDataFormat;

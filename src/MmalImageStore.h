@@ -1,6 +1,6 @@
 /*
  ****************************************************************************
- *  Copyright (c) 2014 Uriah Liggett <freelaserscanner@gmail.com>           *
+ *  Copyright (c) 2015 Uriah Liggett <freelaserscanner@gmail.com>           *
  *	This file is part of FreeLSS.                                           *
  *                                                                          *
  *  FreeLSS is free software: you can redistribute it and/or modify         *
@@ -17,61 +17,46 @@
  *   along with FreeLSS.  If not, see <http://www.gnu.org/licenses/>.       *
  ****************************************************************************
 */
-
 #pragma once
-#include "Image.h"
-#include "CriticalSection.h"
-#include "Camera.h"
 
-// Forward declaration
-namespace raspicam
-{
-	class RaspiCam;
-}
+#include "Image.h"
 
 namespace freelss
 {
 
-class RaspicamCamera : public Camera
+/** Represents a single image in the store */
+struct MmalImageStoreItem
+{
+	MmalImageStoreItem(unsigned width, unsigned height, unsigned numComponents);
+	Image image;
+	bool available;
+	MMAL_BUFFER_HEADER_T * buffer;
+};
+
+/**
+ * Manages the availability and memory of images for a Camera object.
+ */
+class MmalImageStore
 {
 public:
-	RaspicamCamera(int imageWidth = 1280, int imageHeight = 960);
+	MmalImageStore(int numImages, unsigned width, unsigned height, unsigned numComponents);
+	~MmalImageStore();
 
-	~RaspicamCamera();
+	/** Returns the first available image and makes it unavailable */
+	MmalImageStoreItem * reserve();
 
-	void acquireImage(Image * image);
+	/** Returns the first available image for the given buffer and makes it unavailable */
+	MmalImageStoreItem * reserve(MMAL_BUFFER_HEADER_T * buffer);
 
-	bool acquireJpeg(byte* buffer, unsigned * size);
-
-	/** Returns the height of the image that this camera takes. */
-	int getImageHeight() const;
-
-	/** Returns the width of the image that this camera takes */
-	int getImageWidth() const;
-
-	/** Returns the number of image components */
-	int getImageComponents() const;
-
-	/** Returns the width of the sensor in mm */
-	real getSensorWidth() const;
-
-	/** Returns the height of the sensor in mm */
-	real getSensorHeight() const;
-
-	/** Returns the focal length of the camera in mm */
-	real getFocalLength() const;
+	/** Unlocks any releases any buffers associated with the image and makes it available  */
+	void release(Image * image);
 
 private:
 
-	/** Writes the JPEG to disk for debugging purposes */
-	void writeJpegToDisk(byte * buffer, unsigned size);
+	/** Unlocks any releases any buffers associated with the item and makes it available  */
+	void release(MmalImageStoreItem * item);
 
-private:
-	const int m_imageWidth;
-	const int m_imageHeight;
-	CriticalSection m_cs;
-	raspicam::RaspiCam * m_raspicam;
-	int m_numWritten;
+	std::vector<MmalImageStoreItem *> m_items;
 };
 
 }
